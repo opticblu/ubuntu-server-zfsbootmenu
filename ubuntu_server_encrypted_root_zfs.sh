@@ -984,41 +984,36 @@ debootstrap_createzfspools_Func(){
 		
 		
 		##Create datasets
-		##Aim is to separate OS from user data.
-		##Allows root filesystem to be rolled back without rolling back user data such as logs.
-		##https://didrocks.fr/2020/06/16/zfs-focus-on-ubuntu-20.04-lts-zsys-dataset-layout/
+		##ZFSBootMenu boot-environment snapshots should capture OS-coupled state.
+		##Keep /usr and /var inside the root boot environment instead of sibling datasets.
+		##/home, logs, cache, tmp, and Docker are intentionally separate from boot environments.
 		##https://openzfs.github.io/openzfs-docs/Getting%20Started/Debian/Debian%20Buster%20Root%20on%20ZFS.html#step-3-system-installation
-		##"-o canmount=off" is for a system directory that should rollback with the rest of the system.
 		
-		zfs create	"$RPOOL"/srv 						##server webserver content
-		zfs create -o canmount=off	"$RPOOL"/usr
-		zfs create	"$RPOOL"/usr/local					##locally compiled software
-		zfs create -o canmount=off "$RPOOL"/var 
-		zfs create -o canmount=off "$RPOOL"/var/lib
-		zfs create	"$RPOOL"/var/games					##game files
-		zfs create	"$RPOOL"/var/log 					##log files
-		zfs create	"$RPOOL"/var/mail 					##local mails
-		zfs create	"$RPOOL"/var/snap					##snaps handle revisions themselves
-		zfs create	"$RPOOL"/var/spool					##printing tasks
-		zfs create	"$RPOOL"/var/www					##server webserver content
+		mkdir -p "$mountpoint"/root
+		mkdir -p "$mountpoint"/var/log
+		mkdir -p "$mountpoint"/var/cache
+		mkdir -p "$mountpoint"/var/tmp
+		mkdir -p "$mountpoint"/var/lib/docker
+		mkdir -p "$mountpoint"/srv
+
+		##Persistent service data. Comment this out to include /srv in boot-environment rollbacks.
+		zfs create -o mountpoint=/srv "$RPOOL"/srv
 		
 		
 		##USERDATA datasets
 		zfs create "$RPOOL"/home
-		zfs create -o mountpoint=/root "$RPOOL"/home/root
 		chmod 700 "$mountpoint"/root
 
-		
 		##optional
 		##exclude from snapshots
-		zfs create -o com.sun:auto-snapshot=false "$RPOOL"/var/cache
-		zfs create -o com.sun:auto-snapshot=false "$RPOOL"/var/tmp
+		zfs create -o mountpoint=/var/log "$RPOOL"/var-log
+		zfs create -o mountpoint=/var/cache -o com.sun:auto-snapshot=false "$RPOOL"/var-cache
+		zfs create -o mountpoint=/var/tmp -o com.sun:auto-snapshot=false "$RPOOL"/var-tmp
 		chmod 1777 "$mountpoint"/var/tmp
-		zfs create -o com.sun:auto-snapshot=false "$RPOOL"/var/lib/docker ##Docker manages its own datasets & snapshots
+		zfs create -o mountpoint=/var/lib/docker -o com.sun:auto-snapshot=false "$RPOOL"/docker ##Docker manages its own datasets & snapshots
 
-	
 		##Mount a tempfs at /run
-		mkdir "$mountpoint"/run
+		mkdir -p "$mountpoint"/run
 		mount -t tmpfs tmpfs "$mountpoint"/run
 
 	}
@@ -1725,7 +1720,7 @@ systemsetupFunc_part4(){
 				case "$zfs_root_encrypt" in
 					native)
 						##Convert rpool to use keyfile.
-						echo $zfs_root_password > /etc/zfs/$RPOOL.key ##This file will live inside your initramfs stored on the ZFS boot environment.
+						printf '%s\n' "$zfs_root_password" > /etc/zfs/$RPOOL.key ##This file will live inside your initramfs stored on the ZFS boot environment.
 						chmod 600 /etc/zfs/$RPOOL.key ##Set access rights to keyfile. 
 						
 						zfs change-key -o keylocation=file:///etc/zfs/$RPOOL.key -o keyformat=passphrase $RPOOL
@@ -1885,7 +1880,7 @@ systemsetupFunc_part5(){
 
 	chroot "$mountpoint" /bin/bash -x <<-EOCHROOT
 		##Set root password
-		echo -e "root:$PASSWORD" | chpasswd -c SHA256
+		printf '%s:%s\n' root "$PASSWORD" | chpasswd -c SHA256
 	EOCHROOT
 	
 	##Configure swap
@@ -2068,7 +2063,7 @@ usersetup(){
 		cp -a /etc/skel/. /home/"$user"
 		chown -R "$user":"$user" /home/"$user"
 		usermod -a -G adm,cdrom,dip,lpadmin,lxd,plugdev,sambashare,sudo "$user"
-		echo -e "$user:$PASSWORD" | chpasswd
+		printf '%s:%s\n' "$user" "$PASSWORD" | chpasswd
 
 		##Disable root login with password. Login as root with SSH key is possible if configured.
 		##https://help.ubuntu.com/community/RootSudo
@@ -2102,10 +2097,7 @@ distroinstall(){
 	#rm -f /etc/resolv.conf ##Gives an error during ubuntu-server install. "Same file as /run/systemd/resolve/stub-resolv.conf". https://bugs.launchpad.net/ubuntu/+source/systemd/+bug/1774632
 	#ln -s /run/systemd/resolve/resolv.conf /etc/resolv.conf
 	
-	if [ "$distro_variant" != "server" ];
-	then
-		zfs create 	"$RPOOL"/var/lib/AccountsService
-	fi
+	##AccountsService state lives under /var/lib inside the boot environment.
 
 	case "$distro_variant" in
 		server)	
